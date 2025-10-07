@@ -2,14 +2,12 @@
 pragma solidity ^0.8.19;
 
 /*
-  Single-file package:
-   - AureusToken   (ERC-20, used for testing or as a template)
-   - AureusRewards (reward / membership contract)
-  Single-file so you can paste into Remix and verify on BaseScan without flattening.
+  AureusRewards.sol
+  Single-file, Remix-ready reward contract (drop-in replacement).
+  - Use your NATO token address as the _rewardToken constructor arg.
+  - Default "Based" daily claim = 10 tokens (10 * 1e18).
 */
 
-/// ---------------------------------------------------------------------------
-/// Minimal IERC20
 interface IERC20 {
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
@@ -21,67 +19,12 @@ interface IERC20 {
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
 }
 
-/// ---------------------------------------------------------------------------
-/// AureusToken - straightforward ERC20 (use for testing or launch your token)
-contract AureusToken is IERC20 {
-    string public name = "Aureus Token";
-    string public symbol = "AUR";
-    uint8 public decimals = 18;
-    uint256 private _totalSupply;
-    mapping(address => uint256) private _balances;
-    mapping(address => mapping(address => uint256)) private _allowances;
-
-    constructor(uint256 initialMint) {
-        _mint(msg.sender, initialMint);
-    }
-
-    function totalSupply() external view override returns (uint256) { return _totalSupply; }
-    function balanceOf(address account) external view override returns (uint256) { return _balances[account]; }
-
-    function transfer(address to, uint256 amount) external override returns (bool) {
-        _transfer(msg.sender, to, amount);
-        return true;
-    }
-    function allowance(address owner, address spender) external view override returns (uint256) {
-        return _allowances[owner][spender];
-    }
-    function approve(address spender, uint256 amount) external override returns (bool) {
-        _allowances[msg.sender][spender] = amount;
-        emit Approval(msg.sender, spender, amount);
-        return true;
-    }
-    function transferFrom(address from, address to, uint256 amount) external override returns (bool) {
-        uint256 allowed = _allowances[from][msg.sender];
-        require(allowed >= amount, "ERC20: allowance");
-        _allowances[from][msg.sender] = allowed - amount;
-        _transfer(from, to, amount);
-        return true;
-    }
-
-    function _transfer(address from, address to, uint256 amount) internal {
-        require(to != address(0), "ERC20: to zero");
-        uint256 bal = _balances[from];
-        require(bal >= amount, "ERC20: balance");
-        _balances[from] = bal - amount;
-        _balances[to] += amount;
-        emit Transfer(from, to, amount);
-    }
-    function _mint(address to, uint256 amount) internal {
-        require(to != address(0), "mint zero");
-        _totalSupply += amount;
-        _balances[to] += amount;
-        emit Transfer(address(0), to, amount);
-    }
-}
-
-/// ---------------------------------------------------------------------------
-/// Minimal SafeERC20 helper (low-level-safe)
 library SafeERC20 {
     function _callOptionalReturn(IERC20 token, bytes memory data) private {
         (bool success, bytes memory returndata) = address(token).call(data);
         require(success, "Low-level call failed");
         if (returndata.length > 0) {
-            require(abi.decode(returndata, (bool)), "ERC20 operation did not succeed");
+            require(abi.decode(returndata, (bool)), "ERC20 op did not succeed");
         }
     }
     function safeTransfer(IERC20 token, address to, uint256 value) internal {
@@ -92,11 +35,8 @@ library SafeERC20 {
     }
 }
 
-/// ---------------------------------------------------------------------------
-/// Ownership / Security primitives (compact, reliable)
-abstract contract Context {
-    function _msgSender() internal view virtual returns (address) { return msg.sender; }
-}
+/* Ownable + two-step ownership */
+abstract contract Context { function _msgSender() internal view virtual returns (address) { return msg.sender; } }
 
 contract Ownable is Context {
     address private _owner;
@@ -105,9 +45,13 @@ contract Ownable is Context {
     modifier onlyOwner() { require(_owner == _msgSender(), "Ownable: caller"); _; }
     function owner() public view returns (address) { return _owner; }
     function transferOwnership(address newOwner) public virtual onlyOwner {
-        require(newOwner != address(0), "Ownable: zero");
-        emit OwnershipTransferred(_owner, newOwner);
+        require(newOwner != address(0), "Ownable: new owner zero");
+        _transferOwnership(newOwner);
+    }
+    function _transferOwnership(address newOwner) internal virtual {
+        address old = _owner;
         _owner = newOwner;
+        emit OwnershipTransferred(old, newOwner);
     }
 }
 
@@ -115,32 +59,20 @@ contract Ownable2Step is Ownable {
     address private _pendingOwner;
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     function pendingOwner() public view returns (address) { return _pendingOwner; }
-
-    // start transfer -> set pending
-    function transferOwnership(address newOwner) public override onlyOwner {
+    // override to set pending
+    function transferOwnership(address newOwner) public virtual override onlyOwner {
         _pendingOwner = newOwner;
         emit OwnershipTransferStarted(owner(), newOwner);
     }
-
-    // pending accepts -> becomes owner
+    // accept ownership
     function acceptOwnership() public {
         require(_pendingOwner == _msgSender(), "Ownable2Step: not pending");
-        emit OwnershipTransferred(owner(), _pendingOwner);
-        // set new owner
-        // NOTE: call parent's internal logic by calling Ownable.transferOwnership directly:
-        // we can't call super.transferOwnership (it requires onlyOwner), so set storage via low-level update:
-        // Simpler approach: use a private variable in Ownable but we've kept it minimal; so just set using assembly:
-        address newOwnerAddr = _pendingOwner;
-        // clear pending
+        _transferOwnership(msg.sender);
         _pendingOwner = address(0);
-        // set owner (using storage slot 0 of Ownable: this is safe here for a single-file educational contract)
-        assembly {
-            sstore(0, newOwnerAddr)
-        }
     }
 }
 
-/// ReentrancyGuard (simple)
+/* Reentrancy guard */
 abstract contract ReentrancyGuard {
     uint256 private _status;
     uint256 private constant NOT_ENTERED = 1;
@@ -154,7 +86,7 @@ abstract contract ReentrancyGuard {
     }
 }
 
-/// Pausable (simple)
+/* Pausable */
 abstract contract Pausable is Context {
     bool private _paused;
     event Paused(address account);
@@ -166,8 +98,7 @@ abstract contract Pausable is Context {
     function _unpause() internal whenPaused { _paused = false; emit Unpaused(_msgSender()); }
 }
 
-/// ---------------------------------------------------------------------------
-/// AureusRewards (main app) - daily claim + batch + upgrades
+/* Main contract */
 contract AureusRewards is ReentrancyGuard, Pausable, Ownable2Step {
     using SafeERC20 for IERC20;
 
@@ -204,8 +135,8 @@ contract AureusRewards is ReentrancyGuard, Pausable, Ownable2Step {
     event ERC20Recovered(address token, uint256 amount);
     event EmergencyModeActivated(address by);
     event EmergencyModeDeactivated(address by);
+    event LevelConfigUpdated(MembershipLevel level, uint96 dailyYield, uint160 upgradeReq);
 
-    // Modifiers
     modifier onlyRelayer() { require(msg.sender == trustedRelayer, "OnlyRelayer"); _; }
     modifier accountExists(address user) { require(userAccounts[user].exists, "AccountDoesNotExist"); _; }
     modifier validAmount(uint256 amount) { require(amount > 0, "InvalidAmount"); _; }
@@ -223,13 +154,13 @@ contract AureusRewards is ReentrancyGuard, Pausable, Ownable2Step {
         upgradeTokenRecipient = _upgradeRecipient;
         trustedRelayer = _trustedRelayer;
 
-        // default levels (example numbers)
+        // defaults: Based = 10 tokens, SuperBased = 15, Legendary = 20 (units: 1e18)
         levelConfigs[MembershipLevel.Based] = LevelConfig({ dailyClaimYield: uint96(10 ether), upgradeRequirement: uint160(0) });
         levelConfigs[MembershipLevel.SuperBased] = LevelConfig({ dailyClaimYield: uint96(15 ether), upgradeRequirement: uint160(30000 ether) });
         levelConfigs[MembershipLevel.Legendary] = LevelConfig({ dailyClaimYield: uint96(20 ether), upgradeRequirement: uint160(60000 ether) });
     }
 
-    // --- account lifecycle
+    /* ========== USER ACTIONS ========== */
     function createAccount() external nonReentrant whenNotPaused notInEmergencyMode {
         require(!userAccounts[msg.sender].exists, "AccountAlreadyExists");
         userAccounts[msg.sender] = UserAccount({
@@ -243,23 +174,20 @@ contract AureusRewards is ReentrancyGuard, Pausable, Ownable2Step {
         emit AccountCreated(msg.sender, block.timestamp);
     }
 
-    // single claim (only relayer calls)
     function dailyClaim(address user) external onlyRelayer nonReentrant whenNotPaused notInEmergencyMode accountExists(user) {
         _doDailyClaim(user);
     }
 
-    // batch: relayer passes many users; failing users won't revert the whole batch
     function batchDailyClaim(address[] calldata users) external onlyRelayer nonReentrant whenNotPaused notInEmergencyMode {
         for (uint256 i = 0; i < users.length; ++i) {
             try this._doDailyClaimExternal(users[i]) {
-                // success
+                // success - events emitted inside
             } catch {
-                // skip failing user (cooldown / insufficient funds)
+                // skip failing user (cooldown / insufficient balance)
             }
         }
     }
 
-    // internal implementation
     function _doDailyClaim(address user) internal accountExists(user) {
         UserAccount storage account = userAccounts[user];
         require(block.timestamp >= uint256(account.lastDailyClaimTime) + DAILY_CLAIM_COOLDOWN, "DailyClaimOnCooldown");
@@ -273,13 +201,12 @@ contract AureusRewards is ReentrancyGuard, Pausable, Ownable2Step {
         emit YieldDistributed(user, yieldAmount, "daily_claim");
     }
 
-    // wrapper for try/catch in batch
+    // external wrapper so try/catch in batch works
     function _doDailyClaimExternal(address user) external {
         require(msg.sender == address(this), "only this");
         _doDailyClaim(user);
     }
 
-    // upgrade membership (called by relayer, user must have approved)
     function upgradeMembership(address user, MembershipLevel targetLevel) external onlyRelayer nonReentrant whenNotPaused notInEmergencyMode accountExists(user) {
         UserAccount storage account = userAccounts[user];
         MembershipLevel currentLevel = account.membershipLevel;
@@ -294,26 +221,42 @@ contract AureusRewards is ReentrancyGuard, Pausable, Ownable2Step {
         emit MembershipUpgraded(user, currentLevel, targetLevel, cost);
     }
 
-    // --- admin
+    /* ========== OWNER / ADMIN ========== */
     function updateRelayer(address newRelayer) external onlyOwner {
         require(newRelayer != address(0), "InvalidRecipient");
         trustedRelayer = newRelayer;
         emit RelayerUpdated(newRelayer);
     }
+
     function updateUpgradeRecipient(address newRecipient) external onlyOwner {
         require(newRecipient != address(0), "InvalidRecipient");
         upgradeTokenRecipient = newRecipient;
         emit UpgradeTokenRecipientUpdated(newRecipient);
     }
+
+    function setLevelConfig(MembershipLevel level, uint96 dailyYield, uint160 upgradeRequirement) external onlyOwner {
+        levelConfigs[level] = LevelConfig({ dailyClaimYield: dailyYield, upgradeRequirement: upgradeRequirement });
+        emit LevelConfigUpdated(level, dailyYield, upgradeRequirement);
+    }
+
+    function pause() external onlyOwner { _pause(); }
+    function unpause() external onlyOwner { _unpause(); }
+
     function withdrawTokens(address to, uint256 amount) external onlyOwner enforceReserve(amount) nonReentrant validAmount(amount) {
         SafeERC20.safeTransfer(rewardToken, to, amount);
         emit TokensWithdrawn(to, amount);
     }
+
     function recoverERC20(address token, uint256 amount) external onlyOwner onlyInEmergencyMode {
         require(token != address(rewardToken), "Cannot recover primary token");
         IERC20(token).transfer(owner(), amount);
         emit ERC20Recovered(token, amount);
     }
+
     function activateEmergencyMode() external onlyOwner { emergencyMode = true; emit EmergencyModeActivated(msg.sender); }
     function deactivateEmergencyMode() external onlyOwner { emergencyMode = false; emit EmergencyModeDeactivated(msg.sender); }
+
+    /* ========== VIEWS ========== */
+    function getUser(address who) external view returns (UserAccount memory) { return userAccounts[who]; }
+    function getLevelConfig(MembershipLevel level) external view returns (LevelConfig memory) { return levelConfigs[level]; }
 }
